@@ -15,6 +15,7 @@ import org.example.crypto.HMACSigner;
 import org.example.crypto.PasswordHasher;
 import org.example.crypto.SecurityMiddleware;
 import org.example.db.DataBaseInitializer;
+import org.example.tls.TLSConfig;
 
 import java.time.LocalDateTime;
 import java.util.Base64;
@@ -22,7 +23,7 @@ import java.util.UUID;
 import java.util.Random;
 import java.util.regex.Pattern;
 
-public class SecBankVerticle extends AbstractVerticle {
+public class GatewayVerticle extends AbstractVerticle {
     private Pool client;
 
     @Override
@@ -33,7 +34,7 @@ public class SecBankVerticle extends AbstractVerticle {
                     return setupHttpServer();
                 })
                 .onSuccess(server -> {
-                    System.out.println("Servidor SecBank desplegado en HTTP puerto 8080 (Texto plano).");
+                    System.out.println("Servidor Gateway desplegado en HTTPS puerto 8443 (Texto plano).");
                     startPromise.complete();
                 })
                 .onFailure(err -> {
@@ -47,7 +48,7 @@ public class SecBankVerticle extends AbstractVerticle {
         MySQLConnectOptions connectOptions = new MySQLConnectOptions()
                 .setPort(3306)
                 .setHost("localhost")
-                .setDatabase("secbank")
+                .setDatabase("usecure")
                 .setUser("root")
                 .setPassword("root");
 
@@ -352,6 +353,6 @@ public class SecBankVerticle extends AbstractVerticle {
             }
         });
 
-        return vertx.createHttpServer().requestHandler(router).listen(8080);
+        return vertx.createHttpServer(TLSConfig.opcionesServidor()).requestHandler(router).listen();
     }
 }

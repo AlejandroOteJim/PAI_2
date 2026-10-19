@@ -1,9 +1,9 @@
 package org.example.client.attacks;
 
 import org.example.client.EvidenceLog;
-import org.example.client.SecBankClient;
-import org.example.client.SecBankClient.Response;
-import org.example.client.SecBankClient.SignedRequest;
+import org.example.client.ByodClient;
+import org.example.client.ByodClient.Response;
+import org.example.client.ByodClient.SignedRequest;
 
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
@@ -15,7 +15,7 @@ public class MitmAttack {
 
     public static void main(String[] args) throws Exception {
         EvidenceLog log = new EvidenceLog("mitm");
-        SecBankClient client = new SecBankClient();
+        ByodClient client = new ByodClient();
         String user = "mitm_" + UUID.randomUUID().toString().substring(0, 8);
         client.register(user, "Passw0rd!x");
         client.login(user, "Passw0rd!x");

@@ -1,9 +1,8 @@
 package org.example.client;
 
 import org.junit.jupiter.api.Test;
-import org.example.client.SecBankClient;
-import org.example.client.SecBankClient.Response;
-import org.example.client.SecBankClient.SignedRequest;
+import org.example.client.ByodClient.Response;
+import org.example.client.ByodClient.SignedRequest;
 
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
@@ -24,8 +23,8 @@ class SecBankIntegrationTest {
 
     static boolean rejected(Response r) { return r.status() >= 400; }
 
-    SecBankClient loggedClient() throws Exception {
-        SecBankClient c = new SecBankClient();
+    ByodClient loggedClient() throws Exception {
+        ByodClient c = new ByodClient();
         String u = newUser();
         assertTrue(ok(c.register(u, PASS)), "registro");
         assertTrue(ok(c.login(u, PASS)), "login");
@@ -34,12 +33,12 @@ class SecBankIntegrationTest {
 
     @Test // RF1.a
     void registroCorrecto() throws Exception {
-        assertTrue(ok(new SecBankClient().register(newUser(), PASS)));
+        assertTrue(ok(new ByodClient().register(newUser(), PASS)));
     }
 
     @Test // RF1.c
     void registroDuplicadoRechazado() throws Exception {
-        SecBankClient c = new SecBankClient();
+        ByodClient c = new ByodClient();
         String u = newUser();
         assertTrue(ok(c.register(u, PASS)));
         assertTrue(rejected(c.register(u, PASS)));
@@ -47,7 +46,7 @@ class SecBankIntegrationTest {
 
     @Test
     void loginConPasswordIncorrectoRechazado() throws Exception {
-        SecBankClient c = new SecBankClient();
+        ByodClient c = new ByodClient();
         String u = newUser();
         c.register(u, PASS);
         assertTrue(rejected(c.login(u, "incorrecta")));
@@ -60,7 +59,7 @@ class SecBankIntegrationTest {
 
     @Test // RS2 (MitM)
     void transferenciaAlteradaRechazada() throws Exception {
-        SecBankClient c = loggedClient();
+        ByodClient c = loggedClient();
         SignedRequest sr = c.buildTransfer(ORIGIN, DEST, 1250.75, "EUR");
         String altered = sr.bodyAsString().replace("1250.75", "9999.99");
         assertTrue(rejected(c.send(sr.withBody(altered.getBytes(StandardCharsets.UTF_8)))));
@@ -68,7 +67,7 @@ class SecBankIntegrationTest {
 
     @Test // RS3 (Replay)
     void replayRechazado() throws Exception {
-        SecBankClient c = loggedClient();
+        ByodClient c = loggedClient();
         SignedRequest sr = c.buildTransfer(ORIGIN, DEST, 400.00, "EUR");
         assertTrue(ok(c.send(sr)));
         assertTrue(rejected(c.send(sr)));
@@ -76,14 +75,14 @@ class SecBankIntegrationTest {
 
     @Test // RS3 (timestamp)
     void timestampCaducadoRechazado() throws Exception {
-        SecBankClient c = loggedClient();
+        ByodClient c = loggedClient();
         long old = System.currentTimeMillis() / 1000 - 600;
         assertTrue(rejected(c.send(c.buildTransfer(ORIGIN, DEST, 400.00, "EUR", old))));
     }
 
     @Test // RF1.d
     void transferenciaTrasLogoutRechazada() throws Exception {
-        SecBankClient c = loggedClient();
+        ByodClient c = loggedClient();
         SignedRequest sr = c.buildTransfer(ORIGIN, DEST, 10.00, "EUR");
         c.logout();
         assertTrue(rejected(c.send(sr)));
@@ -91,7 +90,7 @@ class SecBankIntegrationTest {
 
     @Test // RS1.b
     void bloqueoTrasIntentosFallidos() throws Exception {
-        SecBankClient c = new SecBankClient();
+        ByodClient c = new ByodClient();
         String u = newUser();
         c.register(u, PASS);
         for (int i = 0; i < MAX_ATTEMPTS; i++) c.login(u, "mala" + i);
