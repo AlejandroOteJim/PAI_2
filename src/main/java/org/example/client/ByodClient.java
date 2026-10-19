@@ -2,6 +2,7 @@ package org.example.client;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.tls.TLSConfig;                                   // PAI-2
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -10,32 +11,20 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 
-/**
- * Cliente SecBank (parte C). Firma cada transferencia con HMAC-SHA256 en la capa de
- * aplicacion. Transporte: HTTP plano (sin TLS), como exige el enunciado.
- *
- * CONTRATO ASUMIDO (acordar con A y B, ajustar aqui si cambia):
- *  - POST /api/v1/register  {"username","password"}
- *  - POST /api/v1/login     {"username","password"} -> {"token":"...","hmacKey":"<hex>"}
- *  - POST /api/v1/logout    cabecera Authorization: Bearer <token>
- *  - POST /api/v1/transfer  body JSON (con tx_id..timestamp) + X-Signature, X-Nonce, X-Timestamp + Authorization
- *  (el servidor actual solo tiene /api/v1/login, y sin token todavia)
- *  - Firma: HMAC-SHA256( timestamp + "\n" + nonce + "\n" + bodyBytes ), en hexadecimal
- */
-public class SecBankClient {
 
-    public static final String DEFAULT_URL = "http://localhost:8080";
+public class ByodClient {
+
+    public static final String DEFAULT_URL = "https://localhost:" + TLSConfig.PUERTO; // Direccion del servidor
+    public static final String DEFAULT_KEYSTORE = "pki/clients/alice.p12";
     public static final String API = "/api/v1";
     public static final String TRANSFER_PATH = API + "/transfer";
 
     public record Response(int status, String body) {}
 
-    /** Peticion ya firmada. Los ataques la manipulan o la reenvian tal cual. */
     public record SignedRequest(byte[] body, String nonce, long timestamp, String signature) {
         public SignedRequest withBody(byte[] newBody) {
             return new SignedRequest(newBody, nonce, timestamp, signature);
@@ -45,21 +34,28 @@ public class SecBankClient {
         }
     }
 
-    // Forzamos HTTP/1.1: por defecto HttpClient.newHttpClient() negocia HTTP/2
-    // (upgrade h2c en texto plano) y eso hace que Wireshark deje de mostrar las
-    // peticiones como texto legible (HTTP/1.1), sino como framing binario HTTP/2.
-    // Para la práctica (captura/análisis manual) necesitamos quedarnos en HTTP/1.1.
-    private final HttpClient http = HttpClient.newBuilder()
-            .version(HttpClient.Version.HTTP_1_1)
-            .build();
+    private final HttpClient http;
     private final ObjectMapper mapper = new ObjectMapper();
     private final String baseUrl;
     private String token;
     private byte[] hmacKey;
 
-    public SecBankClient() { this(DEFAULT_URL); }
+    // Cliente por defecto: dispositivo de alice.
+    public ByodClient() { this(DEFAULT_URL, DEFAULT_KEYSTORE, TLSConfig.CONTRASENA); }
 
-    public SecBankClient(String baseUrl) { this.baseUrl = baseUrl; }
+    public ByodClient(String baseUrl, String almacenDispositivo, String contrasena) {
+        this.baseUrl = baseUrl;
+        try {
+            this.http = HttpClient.newBuilder()
+                    .version(HttpClient.Version.HTTP_1_1)                                  // HTTP/1.1 dentro del túnel
+                    .sslContext(TLSConfig.contextoCliente(almacenDispositivo, contrasena)) // certificado del dispositivo + CA
+                    .sslParameters(TLSConfig.parametrosCliente())                          // solo TLS 1.3, suites AEAD, comprobación del SAN
+                    .build();
+        } catch (Exception e) {
+            throw new IllegalStateException("No se pudo cargar el certificado del dispositivo "
+                    + almacenDispositivo + ": " + e.getMessage(), e);
+        }
+    }
 
     // ---------- Gestion de usuarios ----------
 
@@ -72,12 +68,12 @@ public class SecBankClient {
         if (r.status() == 200) {
             JsonNode n = mapper.readTree(r.body());
 
-            // 1. Tu servidor envía "session_id", así que buscamos eso
+            // 1. El servidor envía "session_id"
             if (n.hasNonNull("session_id")) {
                 this.token = n.get("session_id").asText();
             }
 
-            // 2. Tu servidor envía "hmac_key" en Base64, así que buscamos eso
+            // 2. El servidor envía "hmac_key" en Base64
             if (n.hasNonNull("hmac_key")) {
                 this.hmacKey = java.util.Base64.getDecoder().decode(n.get("hmac_key").asText());
             }
@@ -143,7 +139,7 @@ public class SecBankClient {
         mac.init(new SecretKeySpec(hmacKey, "HmacSHA256"));
         mac.update((timestamp + "\n" + nonce + "\n").getBytes(StandardCharsets.UTF_8));
 
-        // Cambiamos a Base64 para que coincida exactamente con el servidor
+        // Base64 para que coincida exactamente con el servidor
         byte[] hmacBytes = mac.doFinal(body);
         return java.util.Base64.getEncoder().encodeToString(hmacBytes);
     }
