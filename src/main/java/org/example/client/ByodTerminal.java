@@ -3,7 +3,7 @@ package org.example.client;
 import org.example.tls.TLSConfig;
 import java.util.Scanner;
 
-public class gitByodTerminal {
+public class ByodTerminal {
     // El cliente se crea después de elegir el certificado del dispositivo BYOD
     private static ByodClient apiClient;
 
