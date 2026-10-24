@@ -5,6 +5,8 @@ import org.example.server.SecBankVerticle;
 
 public class ServerLauncher {
     public static void main(String [] args) {
+        System.setProperty("jdk.tls.server.enableSessionTicketExtension", "false");
+        System.setProperty("jdk.tls.client.enableSessionTicketExtension", "false");
         Vertx vertx = Vertx.vertx();
         vertx.deployVerticle(new SecBankVerticle())
                 .onFailure(err -> {

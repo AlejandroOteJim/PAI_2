@@ -42,14 +42,13 @@ public class SecBankVerticle extends AbstractVerticle {
                 });
     }
 
-
     private void setupDatabase() {
         MySQLConnectOptions connectOptions = new MySQLConnectOptions()
                 .setPort(3306)
                 .setHost("localhost")
                 .setDatabase("secbank")
-                .setUser("root")
-                .setPassword("root");
+                .setUser("iissi_user")
+                .setPassword("iissi$root");
 
         PoolOptions poolOptions = new PoolOptions().setMaxSize(5);
 
@@ -59,7 +58,6 @@ public class SecBankVerticle extends AbstractVerticle {
                 .using(vertx)
                 .build();
     }
-
 
     public static String generateRandomIban() {
         Random random = new Random();
@@ -228,6 +226,9 @@ public class SecBankVerticle extends AbstractVerticle {
             }
         });
 
+        // ---------------------------------------------------------------------------------
+        // MODIFICACIÓN DE LA PERSONA C: Cierre seguro de sesión y desmontaje del túnel (RF4)
+        // ---------------------------------------------------------------------------------
         router.post("/api/v1/logout").handler(ctx -> {
             try {
                 JsonObject payload = ctx.body().asJsonObject();
@@ -246,8 +247,23 @@ public class SecBankVerticle extends AbstractVerticle {
                                 ctx.response().setStatusCode(404).putHeader("content-type", "application/json")
                                         .end(new JsonObject().put("error", "Sesión no encontrada").encode());
                             } else {
-                                ctx.response().setStatusCode(200).putHeader("content-type", "application/json")
-                                        .end(new JsonObject().put("status", "Sesión cerrada correctamente").encode());
+                                // 1. Auditoría: Registramos el evento de cierre (RS4)
+                                AuditLogger.logRequestEvent(ctx.request(), "LOGOUT_SUCCESS", "Cierre seguro de sesión solicitado para ID: " + sessionId);
+
+                                // 2. Destrucción del contexto criptográfico TLS (RF4)
+                                javax.net.ssl.SSLSession sslSession = ctx.request().connection().sslSession();
+                                if (sslSession != null) {
+                                    sslSession.invalidate();
+                                }
+
+                                // 3. Respuesta al cliente y desmontaje inmediato del túnel TCP/TLS (RF4)
+                                ctx.response().setStatusCode(200)
+                                        .putHeader("content-type", "application/json")
+                                        .putHeader("Connection", "close")
+                                        .end(new JsonObject().put("status", "Sesión cerrada y canal destruido correctamente").encode())
+                                        .onComplete(ar -> {
+                                            ctx.request().connection().close(); // Cierra físicamente el socket (close_notify)
+                                        });
                             }
                         })
                         .onFailure(err -> ctx.response().setStatusCode(500)
@@ -258,6 +274,7 @@ public class SecBankVerticle extends AbstractVerticle {
                         .end(new JsonObject().put("error", "Error procesando JSON").encode());
             }
         });
+        // ---------------------------------------------------------------------------------
 
         // Handler 1: Extraer sesión, validar en BD (con JOIN a users) y ejecutar middleware
         router.post("/api/v1/transfer").handler(ctx -> {
