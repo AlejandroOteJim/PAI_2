@@ -3,6 +3,7 @@ package org.example.crypto;
 import io.vertx.core.Handler;
 import io.vertx.ext.web.RoutingContext;
 import io.vertx.sqlclient.Pool;
+import org.example.server.AuditLogger;
 
 public class SecurityMiddleware implements Handler<RoutingContext> {
 
@@ -34,6 +35,7 @@ public class SecurityMiddleware implements Handler<RoutingContext> {
         }
 
         if (!NonceStore.isTimestampValid(timestamp)) {
+            AuditLogger.logRequestEvent(ctx.request(), "ACCESS_DENIED_EXPIRED", "timestamp fuera de la ventana permitida");
             ctx.response().setStatusCode(401).end("Ataque detectado: El paquete ha caducado.");
             return;
         }
@@ -50,6 +52,7 @@ public class SecurityMiddleware implements Handler<RoutingContext> {
 
 
         if (!HMACSigner.verifyHmac(messageToVerify, signature, secretKey)) {
+            AuditLogger.logRequestEvent(ctx.request(), "ACCESS_DENIED_BAD_HMAC", "firma HMAC no válida: mensaje alterado");
             ctx.response().setStatusCode(401).end("Firma HMAC inválida: El mensaje ha sido alterado.");
             return;
         }
@@ -58,6 +61,7 @@ public class SecurityMiddleware implements Handler<RoutingContext> {
         NonceStore.registerAndCheckNonce(dbClient, nonce, timestamp)
                 .onSuccess(esNuevo -> {
                     if (!esNuevo) {
+                        AuditLogger.logRequestEvent(ctx.request(), "ACCESS_DENIED_REPLAY", "nonce repetido");
                         ctx.response().setStatusCode(401).end("Ataque de Replay detectado: Nonce duplicado.");
                         return;
                     }

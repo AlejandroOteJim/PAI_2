@@ -2,16 +2,20 @@ package org.example.server;
 
 import io.vertx.core.AbstractVerticle;
 import io.vertx.core.Promise;
+import io.vertx.core.http.HttpServer;
 import io.vertx.core.json.JsonObject;
 import io.vertx.ext.web.Router;
+import io.vertx.ext.web.RoutingContext;
 import io.vertx.ext.web.handler.BodyHandler;
 import io.vertx.sqlclient.Pool;
 import io.vertx.sqlclient.Tuple;
+import org.example.auth.DeviceIdentity;
 import org.example.auth.DeviceRegistry;
 import org.example.auth.DeviceSessionGuard;
 import org.example.auth.TwoLayerAuthenticator;
 import org.example.db.SharedPool;
 
+import javax.net.ssl.SSLException;
 import java.util.Random;
 import java.util.regex.Pattern;
 
@@ -82,15 +86,35 @@ public class GatewayVerticle extends AbstractVerticle {
                     return;
                 }
 
-                client.preparedQuery("UPDATE sessions SET active = FALSE WHERE session_id = ? AND active = TRUE")
-                        .execute(Tuple.of(sessionId))
+                // Solo puede cerrar la sesión el mismo dispositivo (certificado) que hizo el login.
+                // Al cerrarla se borra también la clave HMAC: deja de existir en el servidor.
+                String sql;
+                Tuple params;
+                if (ServerMode.tls()) {
+                    DeviceIdentity device = DeviceIdentity.fromRequest(ctx.request());
+                    if (device == null) {
+                        logoutDenegado(ctx, sessionId, "sin certificado de dispositivo");
+                        return;
+                    }
+                    sql = "UPDATE sessions s JOIN session_bindings b ON b.session_id = s.session_id "
+                            + "SET s.active = FALSE, s.hmac_key = '' "
+                            + "WHERE s.session_id = ? AND s.active = TRUE AND b.cert_fingerprint = ?";
+                    params = Tuple.of(sessionId, device.fingerprint());
+                } else { // modo benchmark sin TLS: no hay certificado con el que comprobar
+                    sql = "UPDATE sessions SET active = FALSE, hmac_key = '' WHERE session_id = ? AND active = TRUE";
+                    params = Tuple.of(sessionId);
+                }
+
+                client.preparedQuery(sql)
+                        .execute(params)
                         .onSuccess(rows -> {
                             if (rows.rowCount() == 0) {
-                                ctx.response().setStatusCode(404).putHeader("content-type", "application/json")
-                                        .end(new JsonObject().put("error", "Sesión no encontrada").encode());
+                                // Misma respuesta si no existe, ya estaba cerrada o es de otro dispositivo (no se da pistas)
+                                logoutDenegado(ctx, sessionId, "sesión inexistente, cerrada o de otro dispositivo");
                             } else {
                                 // 1. Auditoría: Registramos el evento de cierre de sesión (RS4)
-                                AuditLogger.logRequestEvent(ctx.request(), "LOGOUT_SUCCESS", "Cierre seguro de sesión para ID: " + sessionId);
+                                AuditLogger.logRequestEvent(ctx.request(), "LOGOUT_SUCCESS",
+                                        "Cierre seguro de sesión " + AuditLogger.sessionRef(sessionId));
 
                                 // 2. Invalidar el contexto criptográfico TLS para prohibir reanudación (RF4)
                                 javax.net.ssl.SSLSession sslSession = ctx.request().connection().sslSession();
@@ -177,6 +201,38 @@ public class GatewayVerticle extends AbstractVerticle {
             }
         });
 
-        return vertx.createHttpServer(ServerMode.opcionesServidor()).requestHandler(router).listen();
+        HttpServer server = vertx.createHttpServer(ServerMode.opcionesServidor());
+
+        // RS4: apertura y cierre de cada túnel, con la IP, el CN del certificado, la versión TLS y la suite
+        server.connectionHandler(conn -> {
+            AuditLogger.Peer peer = AuditLogger.peer(conn);
+            AuditLogger.log("TUNNEL_UP", peer, "túnel establecido");
+            conn.closeHandler(v -> AuditLogger.log("TUNNEL_DOWN", peer, "túnel cerrado"));
+        });
+
+        // RS4: handshakes rechazados (TLS < 1.3, suite no permitida, sin certificado, CA ajena...)
+        server.exceptionHandler(err -> {
+            if (esErrorTls(err)) {
+                AuditLogger.logRawEvent("TLS_HANDSHAKE_REJECTED", "desconocida",
+                        err.getClass().getSimpleName() + ": " + err.getMessage());
+            }
+        });
+
+        return server.requestHandler(router).listen();
+    }
+
+    // Respuesta y auditoría comunes a todos los logout rechazados
+    private static void logoutDenegado(RoutingContext ctx, String sessionId, String motivo) {
+        AuditLogger.logRequestEvent(ctx.request(), "LOGOUT_DENIED", motivo + " " + AuditLogger.sessionRef(sessionId));
+        ctx.response().setStatusCode(401).putHeader("content-type", "application/json")
+                .end(new JsonObject().put("error", "Sesión inválida").encode());
+    }
+
+    // ¿El error (o alguna de sus causas) es un fallo de TLS?
+    private static boolean esErrorTls(Throwable err) {
+        for (Throwable t = err; t != null; t = t.getCause()) {
+            if (t instanceof SSLException) return true;
+        }
+        return false;
     }
 }
