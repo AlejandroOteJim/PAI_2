@@ -78,6 +78,7 @@
             <scope>compile</scope>
         </dependency>
 
+<<<<<<< HEAD
         <!-- Dependencia para cifrado y descifrado de la PAI2 -->
         <dependency>
             <groupId>org.bouncycastle</groupId>
@@ -86,6 +87,8 @@
         </dependency>
 
 
+=======
+>>>>>>> 340726e (terminando ataques)
     </dependencies>
 
     <build>
