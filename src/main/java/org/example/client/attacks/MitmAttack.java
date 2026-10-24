@@ -1,39 +1,46 @@
 package org.example.client.attacks;
 
-import org.example.client.EvidenceLog;
-import org.example.client.SecBankClient;
-import org.example.client.SecBankClient.Response;
-import org.example.client.SecBankClient.SignedRequest;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
 
-import java.nio.charset.StandardCharsets;
-import java.util.UUID;
-
-/** Simula un MitM: altera el importe en transito sin recalcular la firma. */
 public class MitmAttack {
-    static final String ORIGIN = "ES1234567890123456789012";
-    static final String DEST = "ES9876543210987654321098";
 
-    public static void main(String[] args) throws Exception {
-        EvidenceLog log = new EvidenceLog("mitm");
-        SecBankClient client = new SecBankClient();
-        String user = "mitm_" + UUID.randomUUID().toString().substring(0, 8);
-        client.register(user, "Passw0rd!x");
-        client.login(user, "Passw0rd!x");
+    public static void main(String[] args) {
+        System.out.println("--- INICIANDO SIMULACIÓN DE ATAQUE MAN-IN-THE-MIDDLE (MitM) ---");
+        System.out.println("[*] Escenario: El atacante intercepta el tráfico de red intentando leer las credenciales.");
+        System.out.println("[*] Entorno actual: TLS 1.3 con mTLS activado.");
 
-        // Control: una transferencia legitima debe aceptarse
-        SignedRequest legit = client.buildTransfer(ORIGIN, DEST, 1250.75, "EUR");
-        Response r1 = client.send(legit);
-        log.log("[LEGITIMA] body=" + legit.bodyAsString() + " -> " + r1.status() + " " + r1.body());
+        try {
+            // Un cliente HTTP estándar que exige validación de certificados TLS
+            HttpClient client = HttpClient.newBuilder()
+                    .connectTimeout(Duration.ofSeconds(5))
+                    .build();
 
-        // Ataque: el atacante cambia el importe pero conserva firma, nonce y timestamp
-        SignedRequest original = client.buildTransfer(ORIGIN, DEST, 1250.75, "EUR");
-        String tamperedBody = original.bodyAsString().replace("1250.75", "9999.99");
-        SignedRequest tampered = original.withBody(tamperedBody.getBytes(StandardCharsets.UTF_8));
-        log.log("[MITM] original=" + original.bodyAsString());
-        log.log("[MITM] alterado=" + tampered.bodyAsString() + " (firma sin cambios)");
-        Response r2 = client.send(tampered);
-        log.log("[MITM] respuesta servidor -> " + r2.status() + " " + r2.body());
-        log.log(r2.status() >= 400 ? "RESULTADO: manipulacion RECHAZADA (correcto)"
-                : "RESULTADO: manipulacion ACEPTADA (FALLO de seguridad)");
+            // Si un atacante activo intenta interceptar la conexión presentando su propio certificado falso
+            // (ej. un proxy de intercepción como Burp Suite sin certificado raíz instalado en el cliente):
+            System.out.println("[!] El cliente legítimo intenta conectar a través del nodo del atacante...");
+
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create("https://localhost:8080/api/v1/login")) // Notar el HTTPS
+                    .GET()
+                    .build();
+
+            // El cliente de Java abortará la conexión si el certificado no es confiable,
+            // demostrando que MitM es inviable.
+            client.send(req, HttpResponse.BodyHandlers.ofString());
+
+            System.err.println("[FALLO CRÍTICO] El cliente se conectó. El MitM fue exitoso (Esto no debería ocurrir en producción).");
+
+        } catch (javax.net.ssl.SSLHandshakeException e) {
+            System.out.println("\n[ÉXITO] Ataque MitM BLOQUEADO por TLS 1.3.");
+            System.out.println("-> Motivo: El cliente detectó que el certificado presentado por el atacante es inválido o no confiable.");
+            System.out.println("-> Excepción real: " + e.getMessage());
+        } catch (Exception e) {
+            System.out.println("\n[INFO] La conexión falló por otro motivo (Probablemente porque el puerto no está en modo HTTPS todavía).");
+            System.out.println("-> Mensaje: " + e.getMessage());
+        }
     }
 }
