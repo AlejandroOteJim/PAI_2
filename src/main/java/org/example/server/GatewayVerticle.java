@@ -35,14 +35,12 @@ public class GatewayVerticle extends AbstractVerticle {
                 });
     }
 
-
     private void setupDatabase() {
         // PAI-2 persona B (RS3): pool compartido entre todas las instancias del verticle
         this.client = SharedPool.crear(vertx);
         DeviceRegistry registry = new DeviceRegistry(client);
         this.auth = new TwoLayerAuthenticator(client, registry);
     }
-
 
     public static String generateRandomIban() {
         Random random = new Random();
@@ -70,6 +68,9 @@ public class GatewayVerticle extends AbstractVerticle {
 
         router.post("/api/v1/register").handler(auth::register);
 
+        // ---------------------------------------------------------------------------------
+        // MODIFICACIÓN DE LA PERSONA C: Cierre seguro de sesión y desmontaje del túnel (RF4)
+        // ---------------------------------------------------------------------------------
         router.post("/api/v1/logout").handler(ctx -> {
             try {
                 JsonObject payload = ctx.body().asJsonObject();
@@ -88,8 +89,23 @@ public class GatewayVerticle extends AbstractVerticle {
                                 ctx.response().setStatusCode(404).putHeader("content-type", "application/json")
                                         .end(new JsonObject().put("error", "Sesión no encontrada").encode());
                             } else {
-                                ctx.response().setStatusCode(200).putHeader("content-type", "application/json")
-                                        .end(new JsonObject().put("status", "Sesión cerrada correctamente").encode());
+                                // 1. Auditoría: Registramos el evento de cierre de sesión (RS4)
+                                AuditLogger.logRequestEvent(ctx.request(), "LOGOUT_SUCCESS", "Cierre seguro de sesión para ID: " + sessionId);
+
+                                // 2. Invalidar el contexto criptográfico TLS para prohibir reanudación (RF4)
+                                javax.net.ssl.SSLSession sslSession = ctx.request().connection().sslSession();
+                                if (sslSession != null) {
+                                    sslSession.invalidate();
+                                }
+
+                                // 3. Responder al cliente y desmontar el túnel TCP/TLS inmediatamente (RF4)
+                                ctx.response().setStatusCode(200)
+                                        .putHeader("content-type", "application/json")
+                                        .putHeader("Connection", "close")
+                                        .end(new JsonObject().put("status", "Sesión cerrada y canal destruido correctamente").encode())
+                                        .onComplete(ar -> {
+                                            ctx.request().connection().close(); // Cierra físicamente el socket (envía close_notify)
+                                        });
                             }
                         })
                         .onFailure(err -> ctx.response().setStatusCode(500)
@@ -100,6 +116,7 @@ public class GatewayVerticle extends AbstractVerticle {
                         .end(new JsonObject().put("error", "Error procesando JSON").encode());
             }
         });
+        // ---------------------------------------------------------------------------------
 
         // Handler 1: sesión activa, ligada al certificado del login y no revocado (persona B); después el middleware HMAC
         router.post("/api/v1/transfer").handler(new DeviceSessionGuard(client));

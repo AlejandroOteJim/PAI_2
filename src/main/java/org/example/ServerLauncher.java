@@ -15,6 +15,8 @@ import java.nio.file.Path;
 public class ServerLauncher {
     // Argumentos opcionales (persona B, RS3): --sin-tls  --instancias=N  --pool=N
     public static void main(String [] args) {
+        System.setProperty("jdk.tls.server.enableSessionTicketExtension", "false");
+        System.setProperty("jdk.tls.client.enableSessionTicketExtension", "false");
         ServerMode.aplicarArgumentos(args);
         TLSConfig.endurecerJvm();                  // Solo TLS 1.3 en toda la JVM
 
