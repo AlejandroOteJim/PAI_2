@@ -57,6 +57,16 @@ public class ByodClient {
         }
     }
 
+    // PAI-2 persona B (RS3): cliente HTTP sin TLS, solo para el benchmark contra el servidor arrancado con --sin-tls
+    public static ByodClient sinTls(String baseUrl) {
+        return new ByodClient(baseUrl, HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build());
+    }
+
+    private ByodClient(String baseUrl, HttpClient http) {
+        this.baseUrl = baseUrl;
+        this.http = http;
+    }
+
     // ---------- Gestion de usuarios ----------
 
     public Response register(String username, String password) throws Exception {

@@ -44,6 +44,47 @@ CREATE TABLE IF NOT EXISTS user_ibans (
     );
 
 
+-- PAI-2 persona B (RF1): emparejamiento usuario <-> certificado del dispositivo (serie y huella SHA-256 del DER)
+CREATE TABLE IF NOT EXISTS device_certificates (
+    serial              VARCHAR(64) PRIMARY KEY,
+    user_id             INT NOT NULL,
+    cn                  VARCHAR(64) NOT NULL,
+    role                VARCHAR(8) NOT NULL,
+    fingerprint_sha256  CHAR(64) NOT NULL UNIQUE,
+    issued_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+
+-- PAI-2 persona B (RF1): certificados revocados. Una revocación no se puede deshacer
+CREATE TABLE IF NOT EXISTS revoked_certificates (
+    serial      VARCHAR(64) PRIMARY KEY,
+    revoked_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reason      VARCHAR(255) NOT NULL
+    );
+
+-- PAI-2 persona B (RF2): cada sesión queda ligada al certificado con el que se hizo el login
+CREATE TABLE IF NOT EXISTS session_bindings (
+    session_id        VARCHAR(64) PRIMARY KEY,
+    cert_serial       VARCHAR(64) NOT NULL,
+    cert_fingerprint  CHAR(64) NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+    );
+
+-- PAI-2 persona B (RF1, inmutabilidad): los emparejamientos y las revocaciones no se modifican ni se borran.
+-- (Triggers de una sola sentencia, sin ';' internos, para que DataBaseInitializer pueda trocear el script)
+DROP TRIGGER IF EXISTS device_certificates_no_update;
+CREATE TRIGGER device_certificates_no_update BEFORE UPDATE ON device_certificates FOR EACH ROW
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'RF1: el emparejamiento es inmutable, revoca el certificado y re-emite uno nuevo';
+DROP TRIGGER IF EXISTS device_certificates_no_delete;
+CREATE TRIGGER device_certificates_no_delete BEFORE DELETE ON device_certificates FOR EACH ROW
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'RF1: el emparejamiento es inmutable, revoca el certificado y re-emite uno nuevo';
+DROP TRIGGER IF EXISTS revoked_certificates_no_update;
+CREATE TRIGGER revoked_certificates_no_update BEFORE UPDATE ON revoked_certificates FOR EACH ROW
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'RF1: una revocacion no se puede modificar';
+DROP TRIGGER IF EXISTS revoked_certificates_no_delete;
+CREATE TRIGGER revoked_certificates_no_delete BEFORE DELETE ON revoked_certificates FOR EACH ROW
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'RF1: una revocacion no se puede deshacer';
+
 -- Usuarios de prueba (contraseña = nombre de usuario)
 
 INSERT IGNORE INTO users (username, password_hash, salt) VALUES
@@ -66,3 +107,9 @@ INSERT IGNORE INTO user_ibans (username, iban) VALUES
 ('pdi01', 'ES1121000418450200051001'),
 ('pas01', 'ES2221000418450200051002'),
 ('inv01', 'ES3321000418450200051003');
+
+-- PAI-2 persona B (RF1, inmutabilidad): el nombre y el rol de un usuario no cambian aunque se haga un UPDATE sobre users.
+-- Va al final para que el UPDATE de bob de arriba se aplique la primera vez que se crea la BD.
+DROP TRIGGER IF EXISTS users_identity_immutable;
+CREATE TRIGGER users_identity_immutable BEFORE UPDATE ON users FOR EACH ROW
+    SET NEW.username = OLD.username, NEW.role = OLD.role;
