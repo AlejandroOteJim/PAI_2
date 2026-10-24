@@ -1,91 +1,102 @@
 package org.example.server;
 
+import io.vertx.core.http.HttpConnection;
 import io.vertx.core.http.HttpServerRequest;
+import io.vertx.core.net.SocketAddress;
+
 import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSession;
-import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 import java.time.Instant;
 
-public class AuditLogger {
+/**
+ * PAI-2 persona C (RS4): registro de auditoría en logs/audit.log.
+ * Formato de cada línea: [fecha] [EVENTO] IP=.. | CN=.. | Protocol=.. | Suite=.. | Info=..
+ * Eventos: TUNNEL_UP / TUNNEL_DOWN, TLS_HANDSHAKE_REJECTED, LOGIN_* / REGISTER_*, ACCESS_DENIED_*, LOGOUT_*.
+ */
+public final class AuditLogger {
 
-    private static final String LOG_DIR = "logs";
-    private static final String LOG_FILE = "logs/audit.log";
+    private static final Path LOG_FILE = Path.of("logs", "audit.log");
+    private static PrintWriter out;
 
-    // Este bloque estático se asegura de crear la carpeta "logs" si no existe al arrancar
-    static {
-        File dir = new File(LOG_DIR);
-        if (!dir.exists()) {
-            dir.mkdirs();
-        }
+    /** Datos del extremo del túnel: se capturan al abrir la conexión para poder usarlos también al cerrarla. */
+    public record Peer(String ip, String cn, String protocol, String suite) {}
+
+    private AuditLogger() {}
+
+    // ---------------------------------------------------------------- API
+
+    /** Evento de una petición HTTP (login, logout, accesos denegados...). */
+    public static void logRequestEvent(HttpServerRequest req, String eventType, String details) {
+        log(eventType, peer(req.connection(), req.remoteAddress()), details);
     }
 
-    /**
-     * Registra un evento extrayendo automáticamente los metadatos del túnel TLS y mTLS.
-     */
-    public static synchronized void logRequestEvent(HttpServerRequest req, String eventType, String details) {
-        String ip = (req.remoteAddress() != null) ? req.remoteAddress().host() : "UNKNOWN_IP";
-        String cn = "NO_CERT";
-        String tlsProtocol = "NONE (HTTP)";
-        String cipherSuite = "NONE";
+    /** Evento de una conexión (apertura y cierre del túnel). */
+    public static void logConnectionEvent(HttpConnection conn, String eventType, String details) {
+        log(eventType, peer(conn), details);
+    }
 
-        // Extraer la sesión TLS/SSL de Vert.x para sacar los datos criptográficos
-        SSLSession sslSession = req.connection().sslSession();
-        if (sslSession != null) {
-            tlsProtocol = sslSession.getProtocol();
-            cipherSuite = sslSession.getCipherSuite();
-            try {
-                // Obtener el certificado del cliente y extraer su Common Name (CN)
-                Certificate[] certs = sslSession.getPeerCertificates();
-                if (certs != null && certs.length > 0 && certs[0] instanceof X509Certificate) {
-                    X509Certificate x509 = (X509Certificate) certs[0];
-                    cn = extractCN(x509.getSubjectX500Principal().getName());
-                }
-            } catch (SSLPeerUnverifiedException ignored) {
-                cn = "UNVERIFIED_CLIENT";
+    /** Evento a nivel de socket sin petición HTTP (por ejemplo, un handshake rechazado). */
+    public static void logRawEvent(String eventType, String ip, String details) {
+        log(eventType, new Peer(ip, "N/A", "TLS_HANDSHAKE", "N/A"), details);
+    }
+
+    public static Peer peer(HttpConnection conn) {
+        return peer(conn, conn.remoteAddress());
+    }
+
+    public static synchronized void log(String eventType, Peer p, String details) {
+        String line = String.format("[%s] [%s] IP=%s | CN=%s | Protocol=%s | Suite=%s | Info=%s",
+                Instant.now(), eventType, p.ip(), p.cn(), p.protocol(), p.suite(), details);
+        System.out.println(line);
+        try {
+            if (out == null) {
+                Files.createDirectories(LOG_FILE.getParent());
+                // Se abre una sola vez en modo "añadir"; autoflush para no perder líneas si el servidor se cae
+                out = new PrintWriter(new FileWriter(LOG_FILE.toFile(), true), true);
             }
-        }
-
-        writeEntry(eventType, ip, cn, tlsProtocol, cipherSuite, details);
-    }
-
-    /**
-     * Registra eventos a nivel de socket (ej. handshakes fallidos antes de llegar a HTTP)
-     */
-    public static synchronized void logRawEvent(String eventType, String ip, String details) {
-        writeEntry(eventType, ip, "N/A", "TLS_HANDSHAKE", "N/A", details);
-    }
-
-    private static void writeEntry(String eventType, String ip, String cn, String protocol, String suite, String details) {
-        // Formato exacto que pide el requisito RS4
-        String logLine = String.format("[%s] [%s] IP=%s | CN=%s | Protocol=%s | Suite=%s | Info=%s",
-                Instant.now().toString(), eventType, ip, cn, protocol, suite, details);
-
-        // Imprimir por consola para que os sirva de debug mientras programáis
-        System.out.println(logLine);
-
-        // Escribir en el archivo audit.log (añadiendo al final sin sobreescribir)
-        try (FileWriter fw = new FileWriter(LOG_FILE, true);
-             PrintWriter pw = new PrintWriter(fw)) {
-            pw.println(logLine);
+            out.println(line);
         } catch (IOException e) {
             System.err.println("Error crítico escribiendo en audit.log: " + e.getMessage());
         }
     }
 
-    /**
-     * Utilidad para extraer solo el "Nombre" (CN) de la ristra completa del certificado
-     */
+    /** Recorta un session_id para el log: identifica la sesión sin dejar el token completo escrito en disco. */
+    public static String sessionRef(String sessionId) {
+        if (sessionId == null) return "-";
+        return sessionId.length() <= 8 ? sessionId : sessionId.substring(0, 8) + "...";
+    }
+
+    // ---------------------------------------------------------------- utilidades
+
+    private static Peer peer(HttpConnection conn, SocketAddress address) {
+        String ip = address != null ? address.host() : "UNKNOWN_IP";
+        SSLSession ssl = conn != null ? conn.sslSession() : null;
+        if (ssl == null) return new Peer(ip, "NO_CERT", "NONE (HTTP)", "NONE");
+
+        String cn = "NO_CERT";
+        try {
+            Certificate[] certs = ssl.getPeerCertificates();
+            if (certs != null && certs.length > 0 && certs[0] instanceof X509Certificate x509) {
+                cn = extractCN(x509.getSubjectX500Principal().getName());
+            }
+        } catch (SSLPeerUnverifiedException e) {
+            cn = "UNVERIFIED_CLIENT";
+        }
+        return new Peer(ip, cn, ssl.getProtocol(), ssl.getCipherSuite());
+    }
+
+    // Extrae solo el CN de "CN=alice,OU=PDI,O=U-Secure..."
     private static String extractCN(String principalName) {
         for (String part : principalName.split(",")) {
             String trimmed = part.trim();
-            if (trimmed.startsWith("CN=")) {
-                return trimmed.substring(3);
-            }
+            if (trimmed.startsWith("CN=")) return trimmed.substring(3);
         }
         return principalName;
     }

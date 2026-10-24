@@ -6,6 +6,7 @@ import io.vertx.sqlclient.Pool;
 import io.vertx.sqlclient.Row;
 import io.vertx.sqlclient.Tuple;
 import org.example.crypto.SecurityMiddleware;
+import org.example.server.AuditLogger;
 import org.example.server.ServerMode;
 
 import java.nio.charset.StandardCharsets;
@@ -30,6 +31,7 @@ public class DeviceSessionGuard implements Handler<RoutingContext> {
     public void handle(RoutingContext ctx) {
         String authHeader = ctx.request().getHeader("Authorization");
         if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            AuditLogger.logRequestEvent(ctx.request(), "ACCESS_DENIED_NO_SESSION", "petición sin cabecera de sesión a " + ctx.request().path());
             ctx.response().setStatusCode(401).end("Falta cabecera de sesión o formato incorrecto");
             return;
         }
@@ -38,13 +40,15 @@ public class DeviceSessionGuard implements Handler<RoutingContext> {
 
         client.preparedQuery(
                         "SELECT s.hmac_key, u.username, b.cert_fingerprint, (r.serial IS NOT NULL) AS revoked " +
-                        "FROM sessions s JOIN users u ON s.user_id = u.id " +
-                        "LEFT JOIN session_bindings b ON b.session_id = s.session_id " +
-                        "LEFT JOIN revoked_certificates r ON r.serial = b.cert_serial " +
-                        "WHERE s.session_id = ? AND s.active = TRUE")
+                                "FROM sessions s JOIN users u ON s.user_id = u.id " +
+                                "LEFT JOIN session_bindings b ON b.session_id = s.session_id " +
+                                "LEFT JOIN revoked_certificates r ON r.serial = b.cert_serial " +
+                                "WHERE s.session_id = ? AND s.active = TRUE")
                 .execute(Tuple.of(sessionId))
                 .onSuccess(rows -> {
                     if (!rows.iterator().hasNext()) {
+                        AuditLogger.logRequestEvent(ctx.request(), "ACCESS_DENIED_INVALID_SESSION",
+                                "sesión inexistente o cerrada " + AuditLogger.sessionRef(sessionId));
                         ctx.response().setStatusCode(401).end("Sesión inválida o inactiva");
                         return;
                     }
@@ -52,12 +56,14 @@ public class DeviceSessionGuard implements Handler<RoutingContext> {
 
                     if (ServerMode.tls()) {
                         if (!sameDevice(row.getString("cert_fingerprint"), device)) {
-                            System.out.println("[AUTH] SESSION_DEVICE_MISMATCH sesión=" + sessionId + " usada desde " + device);
+                            AuditLogger.logRequestEvent(ctx.request(), "ACCESS_DENIED_DEVICE_MISMATCH",
+                                    "sesión " + AuditLogger.sessionRef(sessionId) + " usada desde " + device);
                             ctx.response().setStatusCode(401).end("La sesión está ligada a otro dispositivo");
                             return;
                         }
                         if (row.getInteger("revoked") == 1) {
-                            System.out.println("[AUTH] SESSION_REVOKED_CERT sesión=" + sessionId + " " + device);
+                            AuditLogger.logRequestEvent(ctx.request(), "ACCESS_DENIED_REVOKED_CERT",
+                                    "sesión " + AuditLogger.sessionRef(sessionId) + " " + device);
                             ctx.response().setStatusCode(403).end("El certificado de esta sesión ha sido revocado");
                             return;
                         }

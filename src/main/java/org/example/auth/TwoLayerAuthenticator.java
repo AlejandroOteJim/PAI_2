@@ -10,6 +10,7 @@ import io.vertx.sqlclient.Tuple;
 import org.example.crypto.HMACSigner;
 import org.example.crypto.PasswordHasher;
 import org.example.server.GatewayVerticle;
+import org.example.server.AuditLogger;
 import org.example.server.ServerMode;
 
 import java.time.LocalDateTime;
@@ -27,6 +28,8 @@ public class TwoLayerAuthenticator {
 
     private static final int MAX_INTENTOS = 5;
     private static final int MINUTOS_BLOQUEO = 5;
+    // Sal para el hash de relleno cuando el usuario no existe (ver login)
+    private static final String SAL_FICTICIA = PasswordHasher.generateSalt();
 
     // Rechazo controlado: lleva el código HTTP y el tipo de evento para la auditoría
     private static final class Rejection extends RuntimeException {
@@ -89,9 +92,9 @@ public class TwoLayerAuthenticator {
                 })
                 .onFailure(err -> {
                     if (err instanceof Rejection r) {
-                        deny(ctx, r);
+                        deny(ctx, r, c.username());
                     } else if (err.getMessage() != null && err.getMessage().contains("Duplicate entry")) {
-                        deny(ctx, new Rejection(409, "REGISTER_DUPLICATE", "El usuario ya existe"));
+                        deny(ctx, new Rejection(409, "REGISTER_DUPLICATE", "El usuario ya existe"), c.username());
                     } else {
                         System.err.println("Error en registro: " + err.getMessage());
                         json(ctx, 500, new JsonObject().put("error", "Error interno en el registro"));
@@ -130,11 +133,11 @@ public class TwoLayerAuthenticator {
         // Capa 1, parte sin BD: el certificado tiene que ser del usuario que intenta entrar
         if (ServerMode.tls()) {
             if (device == null) {
-                deny(ctx, new Rejection(401, "LOGIN_NO_CERT", "Se requiere el certificado del dispositivo"));
+                deny(ctx, new Rejection(401, "LOGIN_NO_CERT", "Se requiere el certificado del dispositivo"), c.username());
                 return;
             }
             if (!device.belongsTo(c.username())) {
-                deny(ctx, new Rejection(403, "LOGIN_CN_MISMATCH", "El certificado del dispositivo no pertenece a '" + c.username() + "'"));
+                deny(ctx, new Rejection(403, "LOGIN_CN_MISMATCH", "El certificado del dispositivo no pertenece a '" + c.username() + "'"), c.username());
                 return;
             }
         }
@@ -143,7 +146,11 @@ public class TwoLayerAuthenticator {
                 .execute(Tuple.of(c.username()))
                 .compose(rows -> {
                     if (!rows.iterator().hasNext()) {
-                        return Future.<JsonObject>failedFuture(new Rejection(404, "LOGIN_UNKNOWN_USER", "Usuario no encontrado"));
+                        // Mismo código, mismo mensaje y mismo coste PBKDF2 que una contraseña incorrecta:
+                        // ni la respuesta ni el tiempo revelan si el usuario existe
+                        return ctx.vertx().executeBlocking(() -> PasswordHasher.hashPassword(c.password(), SAL_FICTICIA), false)
+                                .compose(h -> Future.<JsonObject>failedFuture(
+                                        new Rejection(401, "LOGIN_UNKNOWN_USER", "Credenciales incorrectas")));
                     }
                     Row row = rows.iterator().next();
                     int userId = row.getInteger("id");
@@ -158,7 +165,7 @@ public class TwoLayerAuthenticator {
                             .compose(passwordOk -> passwordOk
                                     ? openSession(userId, device)
                                     : registerFailedAttempt(userId, row.getInteger("failed_attempts"))
-                                            .compose(v -> Future.failedFuture(new Rejection(401, "LOGIN_BAD_PASSWORD", "Credenciales incorrectas"))));
+                                    .compose(v -> Future.failedFuture(new Rejection(401, "LOGIN_BAD_PASSWORD", "Credenciales incorrectas"))));
                 })
                 .compose(session -> client.preparedQuery("SELECT iban FROM user_ibans WHERE username = ? LIMIT 1")
                         .execute(Tuple.of(c.username()))
@@ -170,7 +177,7 @@ public class TwoLayerAuthenticator {
                 })
                 .onFailure(err -> {
                     if (err instanceof Rejection r) {
-                        deny(ctx, r);
+                        deny(ctx, r, c.username());
                     } else {
                         System.err.println("Error en login: " + err.getMessage());
                         json(ctx, 500, new JsonObject().put("error", "Error interno en el login"));
@@ -197,7 +204,7 @@ public class TwoLayerAuthenticator {
         int intentos = failedAttempts + 1;
         Future<?> f = intentos >= MAX_INTENTOS
                 ? client.preparedQuery("UPDATE users SET failed_attempts = 0, locked_until = ? WHERE id = ?")
-                        .execute(Tuple.of(LocalDateTime.now().plusMinutes(MINUTOS_BLOQUEO), userId))
+                .execute(Tuple.of(LocalDateTime.now().plusMinutes(MINUTOS_BLOQUEO), userId))
                 : client.preparedQuery("UPDATE users SET failed_attempts = ? WHERE id = ?").execute(Tuple.of(intentos, userId));
         return f.mapEmpty();
     }
@@ -236,15 +243,14 @@ public class TwoLayerAuthenticator {
         }
     }
 
-    private void deny(RoutingContext ctx, Rejection r) {
-        audit(ctx, r.evento, r.getMessage());
+    private void deny(RoutingContext ctx, Rejection r, String username) {
+        audit(ctx, r.evento, r.getMessage() + " usuario=" + username);
         json(ctx, r.status, new JsonObject().put("error", r.getMessage()));
     }
 
-    // Punto único de auditoría de la autenticación. La persona C puede sustituir el println por AuditLogger.logRequestEvent(ctx.request(), evento, detalle)
+    // Punto único de auditoría de la autenticación (RS4): va a logs/audit.log con IP, CN, versión TLS y suite
     private static void audit(RoutingContext ctx, String evento, String detalle) {
-        String ip = ctx.request().remoteAddress() != null ? ctx.request().remoteAddress().host() : "?";
-        System.out.println("[AUTH] " + evento + " ip=" + ip + " " + detalle);
+        AuditLogger.logRequestEvent(ctx.request(), evento, detalle);
     }
 
     private static void json(RoutingContext ctx, int status, JsonObject body) {
