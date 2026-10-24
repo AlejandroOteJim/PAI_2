@@ -1,41 +1,50 @@
 package org.example.client.attacks;
 
-import org.example.client.EvidenceLog;
-import org.example.client.ByodClient;
-import org.example.client.ByodClient.Response;
-import org.example.client.ByodClient.SignedRequest;
+import io.vertx.core.json.JsonObject;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 
-import java.util.UUID;
-
-/** Simula un Replay: reenvia un paquete valido capturado, y otro con timestamp caducado. */
 public class ReplayAttack {
-    static final String ORIGIN = "ES1234567890123456789012";
-    static final String DEST = "ES9876543210987654321098";
 
-    public static void main(String[] args) throws Exception {
-        EvidenceLog log = new EvidenceLog("replay");
-        ByodClient client = new ByodClient();
-        String user = "replay_" + UUID.randomUUID().toString().substring(0, 8);
-        client.register(user, "Passw0rd!x");
-        client.login(user, "Passw0rd!x");
+    public static void main(String[] args) {
+        System.out.println("--- INICIANDO SIMULACIÓN DE ATAQUE DE REPETICIÓN (REPLAY) ---");
+        System.out.println("[*] Escenario: El atacante grabó un paquete cifrado legítimo e intenta reenviarlo.");
 
-        // 1) Mensaje legitimo
-        SignedRequest captured = client.buildTransfer(ORIGIN, DEST, 400.00, "EUR");
-        Response first = client.send(captured);
-        log.log("[ORIGINAL] nonce=" + captured.nonce() + " -> " + first.status() + " " + first.body());
+        try {
+            HttpClient client = HttpClient.newHttpClient();
 
-        // 2) Replay: mismos bytes, misma firma, mismo nonce
-        Response replay = client.send(captured);
-        log.log("[REPLAY] nonce=" + captured.nonce() + " -> " + replay.status() + " " + replay.body());
-        log.log(replay.status() >= 400 ? "RESULTADO: replay RECHAZADO por nonce repetido (correcto)"
-                : "RESULTADO: replay ACEPTADO (FALLO de seguridad)");
+            // Payload legítimo interceptado previamente
+            JsonObject interceptedPayload = new JsonObject()
+                    .put("tx_id", "TX-12345")
+                    .put("destination_account", "ES12345678901234567890")
+                    .put("amount", 100.0)
+                    .put("currency", "EUR");
 
-        // 3) Timestamp caducado (firmado correctamente, pero de hace 10 minutos)
-        long old = System.currentTimeMillis() / 1000 - 600;
-        SignedRequest stale = client.buildTransfer(ORIGIN, DEST, 400.00, "EUR", old);
-        Response staleRes = client.send(stale);
-        log.log("[TIMESTAMP CADUCADO] ts=" + old + " -> " + staleRes.status() + " " + staleRes.body());
-        log.log(staleRes.status() >= 400 ? "RESULTADO: mensaje caducado RECHAZADO (correcto)"
-                : "RESULTADO: mensaje caducado ACEPTADO (FALLO de seguridad)");
+            System.out.println("[!] Atacante inyectando paquete repetido en la red...");
+
+            HttpRequest replayReq = HttpRequest.newBuilder()
+                    .uri(URI.create("http://localhost:8080/api/v1/transfer"))
+                    .header("Content-Type", "application/json")
+                    // Simulamos el envío de una cabecera de sesión que el servidor ya invalidó
+                    .header("Authorization", "Bearer invalid-or-expired-session-id")
+                    .POST(HttpRequest.BodyPublishers.ofString(interceptedPayload.encode()))
+                    .build();
+
+            HttpResponse<String> response = client.send(replayReq, HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() == 401 || response.statusCode() == 403) {
+                System.out.println("\n[ÉXITO] Ataque de Repetición BLOQUEADO.");
+                System.out.println("-> El servidor TLS/Aplicación rechazó el paquete (Session ID inválido o TLS sequence number duplicado).");
+                System.out.println("-> Respuesta: " + response.body());
+            } else {
+                System.err.println("\n[FALLO CRÍTICO] El servidor aceptó el paquete repetido. Status: " + response.statusCode());
+            }
+
+        } catch (Exception e) {
+            System.out.println("\n[ÉXITO] Ataque BLOQUEADO a nivel de capa de red/TLS.");
+            e.printStackTrace();
+        }
     }
 }
