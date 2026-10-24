@@ -126,22 +126,30 @@ public final class LoadTestClient {
     // Tiempo de establecer la conexión: TCP + handshake TLS 1.3 con mTLS, o solo TCP en modo plano
     private boolean medirHandshake(String usuario, int puerto, SSLContext ctx) {
         long t0 = System.nanoTime();
-        try {
-            if (tls) {
-                try (SSLSocket s = (SSLSocket) ctx.getSocketFactory().createSocket(host, puerto)) {
-                    s.setSSLParameters(TLSConfig.parametrosCliente());
-                    s.startHandshake();
+        for (int intento = 1; ; intento++) {
+            try {
+                if (tls) {
+                    try (SSLSocket s = (SSLSocket) ctx.getSocketFactory().createSocket(host, puerto)) {
+                        s.setSSLParameters(TLSConfig.parametrosCliente());
+                        s.startHandshake();
+                    }
+                } else {
+                    try (Socket s = new Socket()) {
+                        s.connect(new InetSocketAddress(host, puerto));
+                    }
                 }
-            } else {
-                try (Socket s = new Socket()) {
-                    s.connect(new InetSocketAddress(host, puerto));
+                metricas.ok("HANDSHAKE", usuario, System.nanoTime() - t0);
+                return true;
+            } catch (java.net.ConnectException e) {
+                if (intento >= 5) {
+                    metricas.error("HANDSHAKE", usuario, e);
+                    return false;
                 }
+                try { Thread.sleep(20L * intento); } catch (InterruptedException ie) { return false; }
+            } catch (Exception e) {
+                metricas.error("HANDSHAKE", usuario, e);
+                return false;
             }
-            metricas.ok("HANDSHAKE", usuario, System.nanoTime() - t0);
-            return true;
-        } catch (Exception e) {
-            metricas.error("HANDSHAKE", usuario, e);
-            return false;
         }
     }
 
