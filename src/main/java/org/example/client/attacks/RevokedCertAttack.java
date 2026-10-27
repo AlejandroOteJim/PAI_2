@@ -1,49 +1,38 @@
 package org.example.client.attacks;
 
-import io.vertx.core.json.JsonObject;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.time.Duration;
+import org.example.client.ByodClient;
+import org.example.client.EvidenceLog;
+import org.example.tls.TLSConfig;
 
+/**
+ * Certificado revocado: el atacante tiene el dispositivo (y la contraseña) de un usuario cuyo certificado
+ * ya se ha revocado. El handshake TLS se completa (el certificado sigue firmado por la CA), pero el servidor
+ * debe rechazar el login porque el número de serie está en la lista de revocados.
+ *
+ * Antes de ejecutarlo, revocar el certificado:
+ *   java -cp ... org.example.pki.RevocationTool revocar inv01 dispositivo robado
+ * Uso: RevokedCertAttack [usuario]   (por defecto inv01; su contraseña es su nombre de usuario)
+ */
 public class RevokedCertAttack {
 
     public static void main(String[] args) {
-        System.out.println("--- INICIANDO ATAQUE CON CERTIFICADO REVOCADO ---");
-
+        String usuario = args.length > 0 ? args[0] : "inv01";
+        EvidenceLog log = new EvidenceLog("ataque-certificado-revocado");
+        log.log("--- ATAQUE CON CERTIFICADO REVOCADO: dispositivo de " + usuario + " ---");
         try {
-            // Nota: En la versión final, este cliente cargará el KeyStore con un certificado
-            // que previamente hemos marcado como revocado en la base de datos.
-            HttpClient client = HttpClient.newBuilder()
-                    .connectTimeout(Duration.ofSeconds(5))
-                    .build();
+            ByodClient atacante = new ByodClient(ByodClient.DEFAULT_URL, "pki/clients/" + usuario + ".p12", TLSConfig.CONTRASENA);
+            ByodClient.Response r = atacante.login(usuario, usuario);
+            log.log("Respuesta del servidor: " + r.status() + " " + r.body());
 
-            System.out.println("[!] Atacante intentando hacer login con un certificado comprometido...");
-            JsonObject credentials = new JsonObject()
-                    .put("username", "hacker")
-                    .put("password", "hacker123");
-
-            HttpRequest loginReq = HttpRequest.newBuilder()
-                    .uri(URI.create("http://localhost:8080/api/v1/login"))
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(credentials.encode()))
-                    .build();
-
-            HttpResponse<String> loginRes = client.send(loginReq, HttpResponse.BodyHandlers.ofString());
-
-            // El servidor (vía el middleware de la Persona B) debería cortar la conexión o devolver error
-            if (loginRes.statusCode() == 401 || loginRes.statusCode() == 403) {
-                System.out.println("[ÉXITO] Ataque BLOQUEADO. El servidor consultó la lista de revocación (CRL/BD) y rechazó el certificado. Mensaje: " + loginRes.body());
-            } else if (loginRes.statusCode() == 200) {
-                System.err.println("[FALLO CRÍTICO] El servidor permitió el login. Falta implementar la comprobación de revocación.");
+            if (r.status() == 403 && r.body().contains("revocado")) {
+                log.log("[ÉXITO] Ataque BLOQUEADO: el servidor detectó que el certificado está revocado.");
+            } else if (r.status() == 200) {
+                log.log("[FALLO] Login aceptado. ¿Se revocó antes el certificado con RevocationTool revocar " + usuario + "?");
             } else {
-                System.out.println("[?] Respuesta inesperada. Status: " + loginRes.statusCode());
+                log.log("[?] Respuesta inesperada (status " + r.status() + ").");
             }
-
         } catch (Exception e) {
-            System.out.println("[ÉXITO] La conexión fue abortada a nivel TLS (posible rechazo en el handshake).");
-            e.printStackTrace();
+            log.log("[ERROR] No se pudo realizar la prueba (¿servidor TLS arrancado?): " + e);
         }
     }
 }
